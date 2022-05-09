@@ -42,6 +42,12 @@ object TimeDiff:
     val seconds = Math.abs(d.getSeconds % 60)
     s"${days}d ${hours}m ${minutes}m ${seconds}s"
 
+object SearchHashes:
+  def updateModelFromhash(m: Model)(s: String): Model =
+    m.copy(searchTags = s.split(",").toList)
+  def createHashFromModel(m: Model): String           =
+    (m.search :: m.searchTags).filter(_.nonEmpty).mkString(",")
+
 @JSExportTopLevel("TyrianApp")
 object Timerboard extends TyrianApp[Msg, Model]:
 
@@ -51,12 +57,17 @@ object Timerboard extends TyrianApp[Msg, Model]:
       Cmd.Batch(
         Cmd.Emit(Msg.WebSocketStatus(BackendSocket.Status.Connecting)),
         MapData.getMapData,
-        Dom.focus("search-box")(_ => Msg.None)
+        Dom.focus("search-box")(_ => Msg.None),
+        Navigation.getLocationHash(_.fold(_ => Msg.None, r => Msg.LoadHash(r.hash)))
       )
     )
 
+  def updateHash(m: Model): Cmd[Nothing] =
+    Navigation.setLocationHash(SearchHashes.createHashFromModel(m))
+
   def update(msg: Msg, model: Model): (Model, Cmd[Msg]) =
     msg match
+      case Msg.LoadHash(s)        => (SearchHashes.updateModelFromhash(model)(s), Cmd.Empty)
       case Msg.LoadSystems(db)    => (model.copy(systems = db), Cmd.Empty)
       case Msg.SortBy(f)          =>
         (
@@ -85,11 +96,18 @@ object Timerboard extends TyrianApp[Msg, Model]:
         val (nextWS, cmds) = model.socket.update(s)
         (model.copy(socket = nextWS), cmds)
       case Msg.Tick(now)          => (model.copy(now = now), Cmd.Empty)
-      case Msg.Search(s)          => (model.copy(search = s), Logger.info(s"searched for $s"))
+      case Msg.Search(s)          =>
+        val m = model.copy(search = s)
+        (m, updateHash(m))
       case Msg.SearchBackspace    =>
-        if (model.search == "") (model.copy(searchTags = model.searchTags.tail), Cmd.Empty) else (model, Cmd.Empty)
-      case Msg.EnterTag           => (model.copy(searchTags = model.search :: model.searchTags, search = ""), clear("search-box")(_ => Msg.None))
-      case Msg.DeleteTag(s)       => (model.copy(searchTags = model.searchTags.filterNot(_ == s)), Cmd.Empty)
+        val m = if (model.search == "") model.copy(searchTags = model.searchTags.tail) else model
+        (m, updateHash(m))
+      case Msg.EnterTag           =>
+        val m = model.copy(searchTags = model.search :: model.searchTags, search = "")
+        (m, Cmd.Batch(clear("search-box")(_ => Msg.None), updateHash(m)))
+      case Msg.DeleteTag(s)       =>
+        val m = model.copy(searchTags = model.searchTags.filterNot(_ == s))
+        (m, updateHash(m))
       case Msg.None               => (model, Cmd.Empty)
 
   def header(model: Model, field: Field, name: String) =
@@ -206,6 +224,7 @@ enum Field:
   case Time, Type, System, Region, Owner, DefenderScore
 
 enum Msg:
+  case LoadHash(s: String)
   case LoadSystems(db: Map[String, String])
   case SortBy(f: Field)
   case Payload(we: WebsocketEvent)

@@ -8,6 +8,7 @@ import io.circe.*
 import io.circe.syntax.*
 import tyrian.Html.*
 import tyrian.*
+import tyrian.cmds.Dom
 import tyrian.cmds.Logger
 import tyrian.http.*
 import tyrian.websocket.WebSocketEvent
@@ -20,6 +21,7 @@ import scala.scalajs.js.annotation.*
 import scala.util.Try
 
 import CirceEnumHelpers.*
+import InputEffects.*
 
 object MapData:
   private def decodeMapData: Http.Decoder[Map[String, String]] =
@@ -48,7 +50,8 @@ object Timerboard extends TyrianApp[Msg, Model]:
       Model(BackendSocket.init, List(), List(), ZonedDateTime.now()),
       Cmd.Batch(
         Cmd.Emit(Msg.WebSocketStatus(BackendSocket.Status.Connecting)),
-        MapData.getMapData
+        MapData.getMapData,
+        Dom.focus("search-box")(_ => Msg.None)
       )
     )
 
@@ -83,6 +86,11 @@ object Timerboard extends TyrianApp[Msg, Model]:
         (model.copy(socket = nextWS), cmds)
       case Msg.Tick(now)          => (model.copy(now = now), Cmd.Empty)
       case Msg.Search(s)          => (model.copy(search = s), Logger.info(s"searched for $s"))
+      case Msg.SearchBackspace    =>
+        if (model.search == "") (model.copy(searchTags = model.searchTags.tail), Cmd.Empty) else (model, Cmd.Empty)
+      case Msg.EnterTag           => (model.copy(searchTags = model.search :: model.searchTags, search = ""), clear("search-box")(_ => Msg.None))
+      case Msg.DeleteTag(s)       => (model.copy(searchTags = model.searchTags.filterNot(_ == s)), Cmd.Empty)
+      case Msg.None               => (model, Cmd.Empty)
 
   def header(model: Model, field: Field, name: String) =
     th(onClick(Msg.SortBy(field)))(
@@ -104,9 +112,25 @@ object Timerboard extends TyrianApp[Msg, Model]:
       case Field.DefenderScore => res.sortBy(_.defender_score)
     }
 
+  def searchTag(s: String) = div(`class` := "badge badge-outline gap-2")(
+    i(`class` := "fa-solid fa-xmark", onClick(Msg.DeleteTag(s)))(),
+    p(s)
+  )
+
+  val inputKeyConfig = onKeyDown {
+    case k if k.keyCode == 8  => Msg.SearchBackspace
+    case k if k.keyCode == 13 => Msg.EnterTag
+    case _                    => Msg.None
+  }
+
   def view(model: Model): Html[Msg] =
     div(`class` := "overflow-x-auto")(
-      input(`type` := "text", `class` := "input w-full", onInput(Msg.Search(_))),
+      div(`class` := "form-control")(
+        label(`class` := "input-group")(
+          tyrian.Html.span(model.searchTags.reverse.map(searchTag)),
+          input(id    := "search-box", `type` := "text", `class` := "input w-full", onInput(Msg.Search(_)), inputKeyConfig)
+        )
+      ),
       table(`class` := "table table-zebra table-compact w-full")(
         thead(
           tr(
@@ -122,21 +146,21 @@ object Timerboard extends TyrianApp[Msg, Model]:
         tbody(
           model.state
             .map(_.compact(model.now, model.systems))
-            .filter(_.matches(model.search))
+            .filter(e => (model.search :: model.searchTags).forall(e.matches))
             .sortByField(model.sortBy, model.sortDirection)
             .map { e =>
-            tr(
-              id := e.id.toString
-            )(
-              td(e.event_type.toString),
-              td(a(href := s"http://evemaps.dotlan.net/search?q=${e.system}")(e.system)),
-              td(e.region),
-              td(e.owner),
-              td(e.time.toString),
-              td(e.remaining),
-              td(s"${e.defender_score*100}%")
-            )
-          }
+              tr(
+                id := e.id.toString
+              )(
+                td(e.event_type.toString),
+                td(a(href := s"http://evemaps.dotlan.net/search?q=${e.system}")(e.system)),
+                td(e.region),
+                td(e.owner),
+                td(e.time.toString),
+                td(e.remaining),
+                td(s"${e.defender_score * 100}%")
+              )
+            }
         )
       )
     )
@@ -164,6 +188,7 @@ case class Model(
     state: List[Event],
     now: ZonedDateTime,
     search: String = "",
+    searchTags: List[String] = List.empty,
     sortBy: Field = Field.Time,
     sortDirection: Direction = Direction.Asc,
     systems: Map[String, String] = Map.empty
@@ -175,7 +200,7 @@ enum Direction:
     case Asc  => Desc
     case Desc => Asc
   def icon = this match
-    case Asc => i(`class` := "fa-solid fa-arrow-down-short-wide")("")
+    case Asc  => i(`class` := "fa-solid fa-arrow-down-short-wide")("")
     case Desc => i(`class` := "fa-solid fa-arrow-down-wide-short")("")
 enum Field:
   case Time, Type, System, Region, Owner, DefenderScore
@@ -190,6 +215,10 @@ enum Msg:
   case WebSocketStatus(status: BackendSocket.Status)
   case Tick(now: ZonedDateTime)
   case Search(s: String)
+  case DeleteTag(s: String)
+  case SearchBackspace
+  case EnterTag
+  case None
 
 enum EventType derives EnumCodec:
   case tcu_defense

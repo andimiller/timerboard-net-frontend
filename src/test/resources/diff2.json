@@ -1,0 +1,1 @@
+{"diff":[{"op":"replace","path":"/1/event/attackers_score","value":0.75},{"op":"replace","path":"/1/event/defender_score","value":0.25}]}

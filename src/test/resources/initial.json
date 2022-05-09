@@ -1,0 +1,41 @@
+{
+	"initial": [{
+		"solar_system_name": "U1-C18",
+		"event": {
+			"attackers_score": 0.4,
+			"campaign_id": 97018,
+			"constellation_id": 20000648,
+			"defender_id": 99010923,
+			"defender_score": 0.6,
+			"event_type": "tcu_defense",
+			"participants": null,
+			"solar_system_id": 30004441,
+			"start_time": "2022-05-08T19:20:21Z",
+			"structure_id": 1037364181652
+		},
+		"alliance": {
+			"id": 99010923,
+			"ticker": "S.T.A",
+			"name": "STAR TRAILS ALLIANCE"
+		}
+	}, {
+		"solar_system_name": "BJD4-E",
+		"event": {
+			"attackers_score": 0.61,
+			"campaign_id": 97021,
+			"constellation_id": 20000646,
+			"defender_id": 1411711376,
+			"defender_score": 0.39,
+			"event_type": "tcu_defense",
+			"participants": null,
+			"solar_system_id": 30004422,
+			"start_time": "2022-05-08T15:40:21Z",
+			"structure_id": 1036558663337
+		},
+		"alliance": {
+			"id": 1411711376,
+			"ticker": "X.I.X",
+			"name": "Legion of xXDEATHXx"
+		}
+	}]
+}

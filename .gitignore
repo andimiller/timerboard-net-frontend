@@ -1,0 +1,12 @@
+.bloop
+.bsp
+.metals
+.parcel-cache
+dist/*.js
+dist/*.js.map
+dist/index.html
+node_modules
+project/.bloop
+project/project
+project/target
+target

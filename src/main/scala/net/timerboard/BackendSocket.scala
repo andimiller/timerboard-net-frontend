@@ -55,7 +55,7 @@ final case class BackendSocket(socketUrl: String, socket: Option[WebSocket]):
 object BackendSocket:
 
   val init: BackendSocket =
-    BackendSocket("ws://timerboard.net/stream", None)
+    BackendSocket("wss://beta.timerboard.net/stream", None)
 
   enum Status:
     case Connecting

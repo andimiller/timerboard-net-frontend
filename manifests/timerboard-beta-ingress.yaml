@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  name: timerboard-beta
+  namespace: default
+spec:
+  rules:
+  - host: beta.timerboard.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: timerboard-beta
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+      - backend:
+          service:
+            name: timerboard-api
+            port:
+              number: 80
+        path: /stream
+        pathType: ImplementationSpecific
+  tls:
+  - hosts:
+    - beta.timerboard.net
+    secretName: beta-timerboard-ssl

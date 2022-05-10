@@ -1,11 +1,14 @@
 package net.timerboard
 
+import cats.effect.unsafe.implicits.global
 import cats.implicits.*
 import diffson.circe.*
 import diffson.jsonmergepatch.*
 import diffson.jsonpatch.*
 import io.circe.*
 import io.circe.syntax.*
+import net.andimiller.hedgehogs.*
+import net.andimiller.hedgehogs.circe.*
 import tyrian.Html.*
 import tyrian.*
 import tyrian.cmds.Dom
@@ -23,6 +26,22 @@ import scala.util.Try
 import CirceEnumHelpers.*
 import InputEffects.*
 
+object GraphData:
+  case class GraphPayload(nodes: Vector[Node[Long, String]], edges: Vector[Edge[Long, Int]])
+  given Codec[GraphPayload] = io.circe.generic.semiauto.deriveCodec
+
+  private def decodeGraph: Http.Decoder[Graph[Long, String, Int]] =
+    Http.Decoder { response =>
+      val json = response.body
+      io.circe.parser.parse(json).leftWiden[Throwable]
+        .flatMap(_.as[GraphPayload])
+        .leftMap(_.getLocalizedMessage)
+        .flatMap(gp => Graph.fromIterables(gp.nodes, gp.edges, false).toEither.leftMap(_.combineAll))
+    }
+
+  val get: Cmd[Msg] =
+    Http.send(Request.get("./map.json", decodeGraph), _.fold(Msg.BadHttp(_), Msg.LoadMap(_)))
+
 object MapData:
   private def decodeMapData: Http.Decoder[Map[String, String]] =
     Http.Decoder { response =>
@@ -30,7 +49,7 @@ object MapData:
       io.circe.parser.parse(json).leftWiden[Throwable].flatMap(_.as[Map[String, String]]).leftMap(_.getLocalizedMessage)
     }
 
-  val getMapData: Cmd[Msg] =
+  val get: Cmd[Msg] =
     Http.send(Request.get("./system2region.json", decodeMapData), _.fold(Msg.BadHttp(_), Msg.LoadSystems(_)))
 
 object TimeDiff:
@@ -56,7 +75,8 @@ object Timerboard extends TyrianApp[Msg, Model]:
       Model(BackendSocket.init, List(), List(), ZonedDateTime.now()),
       Cmd.Batch(
         Cmd.Emit(Msg.WebSocketStatus(BackendSocket.Status.Connecting)),
-        MapData.getMapData,
+        MapData.get,
+        GraphData.get,
         Dom.focus("search-box")(_ => Msg.None),
         Navigation.getLocationHash(_.fold(_ => Msg.None, r => Msg.LoadHash(r.hash)))
       )
@@ -68,7 +88,8 @@ object Timerboard extends TyrianApp[Msg, Model]:
   def update(msg: Msg, model: Model): (Model, Cmd[Msg]) =
     msg match
       case Msg.LoadHash(s)        => (SearchHashes.updateModelFromhash(model)(s), Cmd.Empty)
-      case Msg.LoadSystems(db)    => (model.copy(systems = db), Cmd.Empty)
+      case Msg.LoadSystems(db)    => (model.copy(systems = db), Logger.info("Regions loaded"))
+      case Msg.LoadMap(g)         => (model.copy(map = g, systemNames = g.nodes.map(_.swap).toMap), Logger.info("Map loaded"))
       case Msg.SortBy(f)          =>
         (
           if (model.sortBy == f)
@@ -99,15 +120,35 @@ object Timerboard extends TyrianApp[Msg, Model]:
       case Msg.Search(s)          =>
         val m = model.copy(search = s)
         (m, updateHash(m))
+      case Msg.System(s) => (model.copy(system = Option(s).filter(_.nonEmpty)), if (model.systemNames.contains(s)) Cmd.Batch(Logger.info("Recalculating distances"), Cmd.Emit(Msg.CalculateDistances)) else Cmd.Empty)
       case Msg.SearchBackspace    =>
         val m = if (model.search == "") model.copy(searchTags = model.searchTags.tail) else model
         (m, updateHash(m))
       case Msg.EnterTag           =>
         val m = model.copy(searchTags = model.search :: model.searchTags, search = "")
         (m, Cmd.Batch(clear("search-box")(_ => Msg.None), updateHash(m)))
+      case Msg.SystemTab          =>
+        model.system.flatMap { sys => model.systemNames.keys.find(_.startsWith(sys)) } match {
+          case Some(sys) => (model.copy(system = Some(sys)), Cmd.Batch(Cmd.Emit(Msg.CalculateDistances), setContents("system-box")(sys)))
+          case None => (model, Cmd.Empty)
+        }
       case Msg.DeleteTag(s)       =>
         val m = model.copy(searchTags = model.searchTags.filterNot(_ == s))
         (m, updateHash(m))
+      case Msg.CalculateDistances =>
+        val run = Cmd.Run[Unit, Msg] { observer =>
+          cats.effect.IO {
+            model.system.flatMap(model.systemNames.get).map { fromId =>
+              val routes: List[(Long, Long)] = model.state.map(_.event.solar_system_id).tupleLeft(fromId).distinct
+              val (known, unknown) = routes.partition(model.distances.contains)
+              val newDistances: Map[(Long, Long), Int] = Dijkstra.multi(model.map)(fromId, unknown.map(_._2).toSet).map { case (k, (d, _)) => (fromId, k) -> d}
+              Msg.UpdateDistances(model.distances ++ newDistances)
+            }.fold(observer.onError(()))(observer.onNext)
+          }.unsafeRunAndForget()
+          () => ()
+        }.attempt(_.fold(_ => Msg.None, identity))
+        (model, run)
+      case Msg.UpdateDistances(d) => (model.copy(distances = d), Logger.info(s"Distances recalculated"))
       case Msg.None               => (model, Cmd.Empty)
 
   def header(model: Model, field: Field, name: String) =
@@ -128,6 +169,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
       case Field.Region        => res.sortBy(_.region)
       case Field.Owner         => res.sortBy(_.owner)
       case Field.DefenderScore => res.sortBy(_.defender_score)
+      case Field.Distance      => res.sortBy(_.distance)
     }
 
   def searchTag(s: String) = div(`class` := "badge badge-outline gap-2")(
@@ -141,42 +183,58 @@ object Timerboard extends TyrianApp[Msg, Model]:
     case _                    => Msg.None
   }
 
+  val systemBoxKeyConfig = onKeyDown {
+    case k if k.keyCode == 9  => Msg.SystemTab
+    case _                    => Msg.None
+  }
+
+  def systemInputBoxClasses(m: Model): List[String] = m.system.map {
+    case s if m.systemNames.contains(s) => List("input-success")
+    case _ => List("input-error")
+  }.getOrElse(List.empty) ++ List("input", "input-bordered", "max-w-s")
+
+
   def view(model: Model): Html[Msg] =
     div(`class` := "overflow-x-auto")(
       div(`class` := "form-control")(
         label(`class` := "input-group")(
           tyrian.Html.span(model.searchTags.reverse.map(searchTag)),
-          input(id    := "search-box", `type` := "text", `class` := "input w-full", onInput(Msg.Search(_)), inputKeyConfig)
+          input(id    := "search-box", `type` := "text", `class` := "input w-full", placeholder := "Type here to filter, hit enter to multi-filter", onInput(Msg.Search(_)), inputKeyConfig),
+          input(id := "system-box", `type` := "text", `class` := systemInputBoxClasses(model).mkString(" "), placeholder := "Solar System", onInput(Msg.System(_)), systemBoxKeyConfig)
         )
       ),
       table(`class` := "table table-zebra table-compact w-full")(
         thead(
           tr(
-            header(model, Field.Type, "Type"),
-            header(model, Field.System, "System"),
-            header(model, Field.Region, "Region"),
-            header(model, Field.Owner, "Owner"),
-            header(model, Field.Time, "Time"),
-            header(model, Field.Time, "Remaining"),
-            header(model, Field.DefenderScore, "Defender Score")
+            List(
+              header(model, Field.Type, "Type"),
+              header(model, Field.System, "System"),
+              header(model, Field.Region, "Region"),
+              header(model, Field.Owner, "Owner"),
+              header(model, Field.Time, "Time"),
+              header(model, Field.Time, "Remaining"),
+              header(model, Field.DefenderScore, "Defender Score")
+            ) ++ (if (model.system.exists(model.systemNames.contains)) List(header(model, Field.Distance, "Distance (in gates)")) else List.empty)
           )
         ),
         tbody(
           model.state
-            .map(_.compact(model.now, model.systems))
+            .map(_.compact(model.now, model.systems, model.distances, model.system.flatMap(model.systemNames.get)))
             .filter(e => (model.search :: model.searchTags).forall(e.matches))
             .sortByField(model.sortBy, model.sortDirection)
             .map { e =>
               tr(
                 id := e.id.toString
               )(
-                td(e.event_type.toString),
-                td(a(href := s"http://evemaps.dotlan.net/search?q=${e.system}")(e.system)),
-                td(e.region),
-                td(e.owner),
-                td(e.time.toString),
-                td(e.remaining),
-                td(s"${e.defender_score * 100}%")
+                List(
+                  td(e.event_type.toString),
+                  td(a(href := s"http://evemaps.dotlan.net/search?q=${e.system}")(e.system)),
+                  td(e.region),
+                  td(e.owner),
+                  td(e.time.toString),
+                  td(e.remaining),
+                  td(s"${e.defender_score * 100}%")
+                ) ++ (if (model.system.exists(model.systemNames.contains)) List(td(e.distance.toString)) else List.empty)
               )
             }
         )
@@ -205,6 +263,10 @@ case class Model(
     logs: List[String],
     state: List[Event],
     now: ZonedDateTime,
+    system: Option[String] = None,
+    map: Graph[Long, String, Int] = Graph(Map.empty, Map.empty),
+    systemNames: Map[String, Long] = Map.empty,
+    distances: Map[(Long, Long), Int] = Map.empty,
     search: String = "",
     searchTags: List[String] = List.empty,
     sortBy: Field = Field.Time,
@@ -221,10 +283,11 @@ enum Direction:
     case Asc  => i(`class` := "fa-solid fa-arrow-down-short-wide")("")
     case Desc => i(`class` := "fa-solid fa-arrow-down-wide-short")("")
 enum Field:
-  case Time, Type, System, Region, Owner, DefenderScore
+  case Time, Type, System, Region, Owner, DefenderScore, Distance
 
 enum Msg:
   case LoadHash(s: String)
+  case LoadMap(g: Graph[Long, String, Int])
   case LoadSystems(db: Map[String, String])
   case SortBy(f: Field)
   case Payload(we: WebsocketEvent)
@@ -234,10 +297,14 @@ enum Msg:
   case WebSocketStatus(status: BackendSocket.Status)
   case Tick(now: ZonedDateTime)
   case Search(s: String)
+  case System(s: String)
   case DeleteTag(s: String)
   case SearchBackspace
   case EnterTag
+  case SystemTab
   case None
+  case CalculateDistances
+  case UpdateDistances(distances: Map[(Long, Long), Int])
 
 enum EventType derives EnumCodec:
   case tcu_defense
@@ -278,16 +345,17 @@ case class Event(
     alliance: Alliance
 ) derives Decoder,
       Encoder.AsObject:
-  def compact(now: ZonedDateTime, systems: Map[String, String]): RenderEvent =
+  def compact(now: ZonedDateTime, regionLookup: Map[String, String], distances: Map[(Long, Long), Int], system: Option[Long]): RenderEvent =
     RenderEvent(
       event.campaign_id,
       event.event_type,
       solar_system_name,
-      systems.get(solar_system_name).getOrElse("Unknown"),
+      regionLookup.get(solar_system_name).getOrElse("Unknown"),
       alliance.name,
       event.start_time,
       TimeDiff(now, event.start_time),
-      event.defender_score
+      event.defender_score,
+      system.flatMap(s => distances.get(s, event.solar_system_id)).getOrElse(0)
     )
 
 case class RenderEvent(
@@ -298,7 +366,8 @@ case class RenderEvent(
     owner: String,
     time: ZonedDateTime,
     remaining: String,
-    defender_score: BigDecimal
+    defender_score: BigDecimal,
+    distance: Int = 0
 ) {
   def matches(s: String): Boolean =
     (event_type.toString ++ system ++ region ++ owner).toLowerCase().contains(s.toLowerCase())

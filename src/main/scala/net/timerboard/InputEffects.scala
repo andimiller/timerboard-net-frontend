@@ -14,6 +14,9 @@ object InputEffects:
   def clear[Msg](elementId: String)(resultToMessage: Either[NotFound, Unit] => Msg): Cmd[Msg] =
     affectInputElement(elementId, _.value = "", resultToMessage)
 
+  def setContents(elementId: String)(value: String): Cmd[Nothing] =
+    Cmd.SideEffect(() => document.getElementById(elementId).asInstanceOf[HTMLInputElement].value = value)
+
   @SuppressWarnings(Array("scalafix:DisableSyntax.null"))
   private def affectInputElement[Msg](
       elementId: String,

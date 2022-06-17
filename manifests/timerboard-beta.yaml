@@ -22,7 +22,7 @@ spec:
         name: timerboard-beta
     spec:
       containers:
-      - image: andimiller/timerboard-net-frontend-tyrian:0.4
+      - image: andimiller/timerboard-net-frontend-tyrian:0.5
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 3

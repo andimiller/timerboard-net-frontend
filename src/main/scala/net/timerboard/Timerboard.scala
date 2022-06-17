@@ -59,7 +59,7 @@ object TimeDiff:
     val hours   = Math.abs(d.toHours % 24)
     val minutes = Math.abs(d.toMinutes & 60)
     val seconds = Math.abs(d.getSeconds % 60)
-    s"${days}d ${hours}m ${minutes}m ${seconds}s"
+    s"${days}d ${hours}h ${minutes}m ${seconds}s"
 
 object SearchHashes:
   def updateModelFromhash(m: Model)(s: String): Model =

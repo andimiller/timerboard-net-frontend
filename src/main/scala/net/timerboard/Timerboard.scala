@@ -26,22 +26,6 @@ import scala.util.Try
 import CirceEnumHelpers.*
 import InputEffects.*
 
-object GraphData:
-  case class GraphPayload(nodes: Vector[Node[Long, String]], edges: Vector[Edge[Long, Int]])
-  given Codec[GraphPayload] = io.circe.generic.semiauto.deriveCodec
-
-  private def decodeGraph: Http.Decoder[Graph[Long, String, Int]] =
-    Http.Decoder { response =>
-      val json = response.body
-      io.circe.parser.parse(json).leftWiden[Throwable]
-        .flatMap(_.as[GraphPayload])
-        .leftMap(_.getLocalizedMessage)
-        .flatMap(gp => Graph.fromIterables(gp.nodes, gp.edges, false).toEither.leftMap(_.combineAll))
-    }
-
-  val get: Cmd[Msg] =
-    Http.send(Request.get("./map.json", decodeGraph), _.fold(Msg.BadHttp(_), Msg.LoadMap(_)))
-
 object MapData:
   private def decodeMapData: Http.Decoder[Map[String, String]] =
     Http.Decoder { response =>
@@ -50,7 +34,27 @@ object MapData:
     }
 
   val get: Cmd[Msg] =
-    Http.send(Request.get("./system2region.json", decodeMapData), _.fold(Msg.BadHttp(_), Msg.LoadSystems(_)))
+    Http.send(Request.get("./system2region.json", decodeMapData), _.fold(Msg.BadHttp(_), Msg.LoadSystemRegions(_)))
+
+object Routefinder:
+  private def decodeDistances: Http.Decoder[Map[Long, Int]] =
+    Http.Decoder { response =>
+      val json = response.body
+      io.circe.parser.parse(json).leftWiden[Throwable].flatMap(_.as[Map[String, Int]].map(_.map { case (k, v) => k.toLong -> v })).leftMap(_.getLocalizedMessage)
+    }
+
+  def get(systemId: Long): Cmd[Msg] =
+    Http.send(Request.get(s"https://routes.timerboard.net/v1/routes/$systemId", decodeDistances), _.fold(Msg.BadHttp(_), Msg.UpdateDistances(_)))
+
+object Systems:
+  private def decodeSystems: Http.Decoder[List[SolarSystem]] =
+    Http.Decoder { response =>
+      val json = response.body
+      io.circe.parser.parse(json).leftWiden[Throwable].flatMap(_.as[List[SolarSystem]]).leftMap(_.getLocalizedMessage)
+    }
+
+  val get: Cmd[Msg] =
+    Http.send(Request.get("https://routes.timerboard.net/v1/systems", decodeSystems), _.fold(Msg.BadHttp(_), Msg.LoadSystems(_)))
 
 object TimeDiff:
   def apply(now: ZonedDateTime, event: ZonedDateTime): String =
@@ -76,7 +80,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
       Cmd.Batch(
         Cmd.Emit(Msg.WebSocketStatus(BackendSocket.Status.Connecting)),
         MapData.get,
-        GraphData.get,
+        Systems.get,
         Dom.focus("search-box")(_ => Msg.None),
         Navigation.getLocationHash(_.fold(_ => Msg.None, r => Msg.LoadHash(r.hash)))
       )
@@ -88,8 +92,8 @@ object Timerboard extends TyrianApp[Msg, Model]:
   def update(msg: Msg, model: Model): (Model, Cmd[Msg]) =
     msg match
       case Msg.LoadHash(s)        => (SearchHashes.updateModelFromhash(model)(s), Cmd.Empty)
-      case Msg.LoadSystems(db)    => (model.copy(systems = db), Logger.info("Regions loaded"))
-      case Msg.LoadMap(g)         => (model.copy(map = g, systemNames = g.nodes.map(_.swap).toMap), Logger.info("Map loaded"))
+      case Msg.LoadSystemRegions(db)    => (model.copy(systems = db), Logger.info("Regions loaded"))
+      case Msg.LoadSystems(systems) => (model.copy(systemNames = systems.map { s => s.name -> s.id}.toMap), Logger.info("System Ids loaded"))
       case Msg.SortBy(f)          =>
         (
           if (model.sortBy == f)
@@ -120,7 +124,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
       case Msg.Search(s)          =>
         val m = model.copy(search = s)
         (m, updateHash(m))
-      case Msg.System(s) => (model.copy(system = Option(s).filter(_.nonEmpty)), if (model.systemNames.contains(s)) Cmd.Batch(Logger.info("Recalculating distances"), Cmd.Emit(Msg.CalculateDistances)) else Cmd.Empty)
+      case Msg.System(s) => (model.copy(system = Option(s).filter(_.nonEmpty)), if (model.systemNames.contains(s)) Cmd.Batch(Logger.info("Recalculating distances"), Cmd.Emit(Msg.CalculateDistances)) else Logger.error(s"unknown system: $s"))
       case Msg.SearchBackspace    =>
         val m = if (model.search == "") model.copy(searchTags = model.searchTags.tail) else model
         (m, updateHash(m))
@@ -136,18 +140,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
         val m = model.copy(searchTags = model.searchTags.filterNot(_ == s))
         (m, updateHash(m))
       case Msg.CalculateDistances =>
-        val run = Cmd.Run[Unit, Msg] { observer =>
-          cats.effect.IO {
-            model.system.flatMap(model.systemNames.get).map { fromId =>
-              val routes: List[(Long, Long)] = model.state.map(_.event.solar_system_id).tupleLeft(fromId).distinct
-              val (known, unknown) = routes.partition(model.distances.contains)
-              val newDistances: Map[(Long, Long), Int] = Dijkstra.multi(model.map)(fromId, unknown.map(_._2).toSet).map { case (k, (d, _)) => (fromId, k) -> d}
-              Msg.UpdateDistances(model.distances ++ newDistances)
-            }.fold(observer.onError(()))(observer.onNext)
-          }.unsafeRunAndForget()
-          () => ()
-        }.attempt(_.fold(_ => Msg.None, identity))
-        (model, run)
+        (model.copy(distances = Map.empty), Cmd.Batch(Routefinder.get(model.system.flatMap(model.systemNames.get).get), Logger.info("Requesting route info")))
       case Msg.UpdateDistances(d) => (model.copy(distances = d), Logger.info(s"Distances recalculated"))
       case Msg.None               => (model, Cmd.Empty)
 
@@ -183,15 +176,18 @@ object Timerboard extends TyrianApp[Msg, Model]:
     case _                    => Msg.None
   }
 
-  val systemBoxKeyConfig = onKeyDown {
-    case k if k.keyCode == 9  => Msg.SystemTab
-    case _                    => Msg.None
-  }
-
   def systemInputBoxClasses(m: Model): List[String] = m.system.map {
     case s if m.systemNames.contains(s) => List("input-success")
     case _ => List("input-error")
   }.getOrElse(List.empty) ++ List("input", "input-bordered", "max-w-s")
+
+
+  def systemsDatalist(systems: List[String]): Html[Msg] =
+    datalist(id := "systems")(
+      systems.map { system =>
+        option(system)
+      }
+    )
 
 
   def view(model: Model): Html[Msg] =
@@ -200,7 +196,8 @@ object Timerboard extends TyrianApp[Msg, Model]:
         label(`class` := "input-group")(
           tyrian.Html.span(model.searchTags.reverse.map(searchTag)),
           input(id    := "search-box", `type` := "text", `class` := "input w-full", placeholder := "Type here to filter, hit enter to multi-filter", onInput(Msg.Search(_)), inputKeyConfig),
-          input(id := "system-box", `type` := "text", `class` := systemInputBoxClasses(model).mkString(" "), placeholder := "Solar System", onInput(Msg.System(_)), systemBoxKeyConfig)
+          input(id := "system-box", list := "systems", `type` := "text", `class` := systemInputBoxClasses(model).mkString(" "), placeholder := "Solar System", onInput(Msg.System(_))),
+          systemsDatalist(model.systems.keys.toList)
         )
       ),
       table(`class` := "table table-zebra table-compact w-full")(
@@ -234,7 +231,11 @@ object Timerboard extends TyrianApp[Msg, Model]:
                   td(e.time.toString),
                   td(e.remaining),
                   td(s"${e.defender_score * 100}%")
-                ) ++ (if (model.system.exists(model.systemNames.contains)) List(td(e.distance.toString)) else List.empty)
+                ) ++ (if (model.system.exists(model.systemNames.contains)) List(td(
+                  e.distance.map(_.toString).map(p).getOrElse(
+                    i(`class` := "fa-solid fa-spinner")(),
+                  )
+                )) else List.empty)
               )
             }
         )
@@ -264,9 +265,8 @@ case class Model(
     state: List[Event],
     now: ZonedDateTime,
     system: Option[String] = None,
-    map: Graph[Long, String, Int] = Graph(Map.empty, Map.empty),
     systemNames: Map[String, Long] = Map.empty,
-    distances: Map[(Long, Long), Int] = Map.empty,
+    distances: Map[Long, Int] = Map.empty,
     search: String = "",
     searchTags: List[String] = List.empty,
     sortBy: Field = Field.Time,
@@ -285,10 +285,12 @@ enum Direction:
 enum Field:
   case Time, Type, System, Region, Owner, DefenderScore, Distance
 
+case class SolarSystem(name: String, id: Long) derives Encoder.AsObject, Decoder
+
 enum Msg:
   case LoadHash(s: String)
-  case LoadMap(g: Graph[Long, String, Int])
-  case LoadSystems(db: Map[String, String])
+  case LoadSystemRegions(db: Map[String, String])
+  case LoadSystems(systems: List[SolarSystem])
   case SortBy(f: Field)
   case Payload(we: WebsocketEvent)
   case BadHttp(e: HttpError)
@@ -304,7 +306,7 @@ enum Msg:
   case SystemTab
   case None
   case CalculateDistances
-  case UpdateDistances(distances: Map[(Long, Long), Int])
+  case UpdateDistances(distances: Map[Long, Int])
 
 enum EventType derives EnumCodec:
   case tcu_defense
@@ -345,7 +347,7 @@ case class Event(
     alliance: Alliance
 ) derives Decoder,
       Encoder.AsObject:
-  def compact(now: ZonedDateTime, regionLookup: Map[String, String], distances: Map[(Long, Long), Int], system: Option[Long]): RenderEvent =
+  def compact(now: ZonedDateTime, regionLookup: Map[String, String], distances: Map[Long, Int], system: Option[Long]): RenderEvent =
     RenderEvent(
       event.campaign_id,
       event.event_type,
@@ -355,7 +357,7 @@ case class Event(
       event.start_time,
       TimeDiff(now, event.start_time),
       event.defender_score,
-      system.flatMap(s => distances.get(s, event.solar_system_id)).getOrElse(0)
+      system.flatMap(s => distances.get(event.solar_system_id))
     )
 
 case class RenderEvent(
@@ -367,7 +369,7 @@ case class RenderEvent(
     time: ZonedDateTime,
     remaining: String,
     defender_score: BigDecimal,
-    distance: Int = 0
+    distance: Option[Int]
 ) {
   def matches(s: String): Boolean =
     (event_type.toString ++ system ++ region ++ owner).toLowerCase().contains(s.toLowerCase())

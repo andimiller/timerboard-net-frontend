@@ -194,6 +194,11 @@ object Timerboard extends TyrianApp[Msg, Model]:
     div(`class` := "overflow-x-auto")(
       div(`class` := "form-control")(
         label(`class` := "input-group")(
+          h1(`class` := "text-5xl font-bold font-sans")(
+            tyrian.Html.span(" "),
+            i(`class` := "fa-solid fa-calendar-days")(),
+            tyrian.Html.span(" ")
+          ),
           tyrian.Html.span(model.searchTags.reverse.map(searchTag)),
           input(id    := "search-box", `type` := "text", `class` := "input w-full", placeholder := "Type here to filter, hit enter to multi-filter", onInput(Msg.Search(_)), inputKeyConfig),
           input(id := "system-box", list := "systems", `type` := "text", `class` := systemInputBoxClasses(model).mkString(" "), placeholder := "Solar System", onInput(Msg.System(_))),

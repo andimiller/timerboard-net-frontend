@@ -1,5 +1,6 @@
 package net.timerboard
 
+import cats.data.Writer
 import cats.effect.unsafe.implicits.global
 import cats.implicits.*
 import diffson.circe.*
@@ -9,6 +10,7 @@ import io.circe.*
 import io.circe.syntax.*
 import net.andimiller.hedgehogs.*
 import net.andimiller.hedgehogs.circe.*
+import squants.time.*
 import tyrian.Html.*
 import tyrian.*
 import tyrian.cmds.Dom
@@ -18,6 +20,8 @@ import tyrian.websocket.WebSocketEvent
 import tyrian.websocket.*
 
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import scala.concurrent.duration.*
 import scala.scalajs.js.annotation.*
@@ -58,12 +62,20 @@ object Systems:
 
 object TimeDiff:
   def apply(now: ZonedDateTime, event: ZonedDateTime): String =
-    val d       = Duration.between(now, event)
-    val days    = d.toDays
-    val hours   = Math.abs(d.toHours % 24)
-    val minutes = Math.abs(d.toMinutes & 60)
-    val seconds = Math.abs(d.getSeconds % 60)
-    s"${days}d ${hours}h ${minutes}m ${seconds}s"
+    val fullSeconds = Seconds(java.time.temporal.ChronoUnit.SECONDS.between(now, event).abs)
+    val times = List(Days, Hours, Minutes, Seconds)
+        .foldM(fullSeconds) { case (rest, unit) =>
+          val quantity = rest.in(unit).floor
+          Writer(List(unit -> quantity.value.toInt), rest.minus(quantity))
+        }
+        .run
+        ._1.toMap
+    val days    = times.getOrElse(Days, 0)
+    val hours = times.getOrElse(Hours, 0)
+    val minutes = times.getOrElse(Minutes, 0)
+    val seconds = times.getOrElse(Seconds, 0)
+    val symbol  = if (now.isAfter(event)) "-" else ""
+    s"$symbol${days}d ${hours}h ${minutes}m ${seconds}s"
 
 object SearchHashes:
   def updateModelFromhash(m: Model)(s: String): Model =
@@ -120,7 +132,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
       case Msg.WebSocketStatus(s) =>
         val (nextWS, cmds) = model.socket.update(s)
         (model.copy(socket = nextWS), cmds)
-      case Msg.Tick(now)          => (model.copy(now = now), Cmd.Empty)
+      case Msg.Tick(now)          => (model.copy(now = now), Logger.info(s"Tick $now"))
       case Msg.Search(s)          =>
         val m = model.copy(search = s)
         (m, updateHash(m))
@@ -247,6 +259,9 @@ object Timerboard extends TyrianApp[Msg, Model]:
       )
     )
 
+  extension (d: scala.scalajs.js.Date)
+    def toZDT = Instant.ofEpochMilli(d.getTime().toLong).atZone(ZoneOffset.UTC)
+
   def subscriptions(model: Model): Sub[Msg] =
     Sub.Batch(
       model.socket.subscribe {
@@ -261,7 +276,7 @@ object Timerboard extends TyrianApp[Msg, Model]:
           Msg.Other(s"close: $code, $reason")
         case WebSocketEvent.Heartbeat           => Msg.Other("tick")
       },
-      Sub.every(1.second, "tick").map(_ => Msg.Tick(ZonedDateTime.now()))
+      Sub.every(1.second, "tick").map(d => Msg.Tick(d.toZDT))
     )
 
 case class Model(

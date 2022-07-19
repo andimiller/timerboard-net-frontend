@@ -12,7 +12,7 @@ lazy val timerboard =
     .enablePlugins(ScalaJSPlugin)
     .settings( // Normal settings
       name              := "timerboard",
-      version           := "0.0.1",
+      version           := "0.11",
       scalaVersion      := "3.1.1",
       organization      := "net.timerboard",
       libraryDependencies ++= Seq(
@@ -26,9 +26,10 @@ lazy val timerboard =
         "io.github.cquiroz" %%% "scala-java-time-tzdb" % "2.4.0-M2",
         "net.andimiller" %%% "hedgehogs-core" % "0.2.0",
         "net.andimiller" %%% "hedgehogs-circe" % "0.2.0",
+        "org.typelevel" %%% "squants" % "1.8.3",
         "org.typelevel" %%% "munit-cats-effect-3" % "1.0.5" % Test,
         "org.scalameta"                %%% "munit"         % "0.7.29" % Test,
-        "net.andimiller" %%% "munit-cats-effect-3-styles" % "1.0.1" % Test
+        "net.andimiller" %%% "munit-cats-effect-3-styles" % "1.0.1" % Test,
       ),
       testFrameworks += new TestFramework("munit.Framework"),
       scalaJSLinkerConfig ~= { _.withModuleKind(ModuleKind.CommonJSModule) },
